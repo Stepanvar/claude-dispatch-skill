@@ -1,0 +1,32 @@
+---
+status: dispatched
+folder: FOLDER_PLACEHOLDER
+session_shape: SESSION_SHAPE_PLACEHOLDER
+depth: DEPTH_PLACEHOLDER
+created: CREATED_PLACEHOLDER
+slug: SLUG_PLACEHOLDER
+---
+
+# TITLE_PLACEHOLDER
+
+## Goal
+
+GOAL_PLACEHOLDER
+
+## Success Criteria
+
+- [ ] CRITERIA_PLACEHOLDER
+
+## Research Needed
+
+RESEARCH_PLACEHOLDER
+
+## Original Prompt
+
+> ORIGINAL_PROMPT_PLACEHOLDER
+
+## Dispatch Command
+
+```bash
+DISPATCH_CMD_PLACEHOLDER
+```
