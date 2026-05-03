@@ -3,18 +3,20 @@
 # Usage: ensure-anchor.sh <window-name> <cwd> [--lazy]
 set -euo pipefail
 
-WINDOW="${1:?Usage: ensure-anchor.sh <window-name> <cwd> [--lazy]}"
+WINDOW="${1:?Usage: ensure-anchor.sh <window-name> <cwd> [--lazy] [--overnight]}"
 CWD="${2:?}"
 LAZY=0
-[[ "${3:-}" == "--lazy" ]] && LAZY=1
+OVERNIGHT=0
+for _arg in "${@:3}"; do
+  [[ "$_arg" == "--lazy" ]] && LAZY=1
+  [[ "$_arg" == "--overnight" ]] && OVERNIGHT=1
+done
+unset _arg
 
-TMUX_SESSION="${TMUX_SESSION:-claude}"
+TMUX_SESSION="claude"
 DISPATCH_DIR="${HOME}/.claude/dispatch"
-CLAUDE_BIN="${CLAUDE_BIN:-${HOME}/.local/bin/claude}"
+CLAUDE_BIN="${HOME}/.local/bin/claude"
 MAX_LIVE_LAZY="${MAX_LIVE_LAZY:-1}"
-# DISPATCH_LAZY_ANCHORS: comma-separated list of anchor names eligible for lazy spawn.
-# Example: export DISPATCH_LAZY_ANCHORS=proj-a,proj-b
-DISPATCH_LAZY_ANCHORS="${DISPATCH_LAZY_ANCHORS:-}"
 SPAWN_LOCK="${DISPATCH_DIR}/anchors/spawn.lock"
 
 # Check if window already exists.
@@ -25,15 +27,10 @@ fi
 
 # For lazy anchors, enforce MAX_LIVE_LAZY and serialize via flock.
 if [[ $LAZY -eq 1 ]]; then
-  # Build regex from DISPATCH_LAZY_ANCHORS (comma-separated → pipe-separated).
-  lazy_pattern="${DISPATCH_LAZY_ANCHORS//,/|}"
-  live_lazy=0
-  if [[ -n "$lazy_pattern" ]]; then
-    live_lazy=$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
-      | grep -cE "^(${lazy_pattern})$" || true)
-  fi
+  live_lazy=$(tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null \
+    | grep -cE '^(life|metagap)$' || true)
   if (( live_lazy >= MAX_LIVE_LAZY )); then
-    echo "[ensure-anchor] lazy cap (${MAX_LIVE_LAZY}) reached — already live: ${live_lazy}. Kill an existing lazy anchor first." >&2
+    echo "[ensure-anchor] lazy cap (${MAX_LIVE_LAZY}) reached — already live: ${live_lazy}. Kill existing anchor first (e.g. 'kill life')." >&2
     exit 1
   fi
 fi
@@ -42,8 +39,13 @@ spawn_window() {
   echo "[ensure-anchor] spawning $WINDOW in $CWD"
   tmux new-window -t "$TMUX_SESSION" -n "$WINDOW" -c "$CWD"
 
-  # Boot claude (no CLAUDE_DISPATCH_ROLE for non-meta anchors/task windows)
-  tmux send-keys -t "${TMUX_SESSION}:${WINDOW}" "$CLAUDE_BIN" Enter
+  # Boot claude (no CLAUDE_DISPATCH_ROLE for non-manager anchors/task windows)
+  if [[ $OVERNIGHT -eq 1 ]]; then
+    echo "[ensure-anchor] overnight mode → opus"
+    tmux send-keys -t "${TMUX_SESSION}:${WINDOW}" "$CLAUDE_BIN --model claude-opus-4-7" Enter
+  else
+    tmux send-keys -t "${TMUX_SESSION}:${WINDOW}" "$CLAUDE_BIN" Enter
+  fi
 
   # Wait for ready
   local script_dir

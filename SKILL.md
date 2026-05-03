@@ -1,29 +1,23 @@
 ---
 name: dispatch
-description: "Use at the start of ANY user message in the tmux window named 'meta' (the claude dispatch orchestrator session) — classifies target folder, triages task depth (quick/medium/complex), scaffolds a task brief when needed, dispatches to tmux anchor / ephemeral task window / inline subagent. Also handles meta-intents: list sessions, kill task, reattach, show last dispatch, compact, follow-up redirect ('actually switch to X'). Do NOT use in any other tmux window."
+description: "Use at the start of ANY user message in the tmux window named 'manager' (the claude dispatch orchestrator session) — every task spawns a fresh ephemeral tmux window (`task:<slug>`). No folder classification, no depth triage. Strict: no inline subagent, no anchor reuse. Optional `@(smartast|metagap|life|metaenhance)` prefix sets cwd; default = $HOME. Optional `overnight:` prefix → opus + automode. Handles meta-intents: list, kill, reattach, show last, compact, cancel, redirect. Do NOT use in any other tmux window."
 ---
 
 # Dispatch Orchestrator Skill
 
-> **Customize before use:**
-> - Edit `references/folder-map.md` to map your project names to their paths.
-> - Set `DISPATCH_LAZY_ANCHORS` env var (comma-separated anchor names) for lazy-spawn support.
-> - See the [README](README.md) for full configuration options.
+**Strict mode: every task → fresh `task:<slug>` ephemeral tmux window. No
+inline path, no anchor reuse, no busy-check, no folder/depth classification.
+Single dispatch shape.**
 
 Reference files (read when needed):
-- `references/folder-map.md` — keyword→folder regex seeds
-- `references/triage-cues.md` — quick/medium/complex thresholds
-- `references/brief-template.md` — medium brief markdown template
+- `references/brief-template.md` — task brief markdown template
 
 Scripts (call via Bash tool):
-- `scripts/ensure-anchor.sh <name> <cwd> [--lazy]`
+- `scripts/ensure-anchor.sh <name> <cwd> [--overnight]`
 - `scripts/dispatch-to-window.sh <name> --paste-file <path>|--text <str>`
-- `scripts/lazy-anchor-registry.sh touch|age|list|remove <name>`
 - `scripts/wait-for-claude-ready.sh <name> [--timeout N] [--trace]`
 
 State files:
-- `~/.claude/dispatch/anchors/<name>.last` — mtime = last dispatch
-- `~/.claude/dispatch/anchors/spawn.lock` — flock mutex for lazy spawns
 - `~/.claude/dispatch/log` — JSONL audit
 - `~/.claude/dispatch/last-dispatch.json` — last dispatch record (for redirects)
 - `~/.claude/tasks/YYYY-MM-DD-HHMM-<slug>.md` — per-task briefs
@@ -34,152 +28,116 @@ State files:
 
 ### Step 1 — Meta-intent check
 
-Read the user message. Match against these patterns (case-insensitive):
+Read user message. Match patterns (case-insensitive):
 
 | Pattern | Action |
 |---|---|
-| `^(list\|ls\|status\|what'?s running)` | `tmux list-windows -t $TMUX_SESSION -F '#{window_name} #{window_index}'` + tail `~/.claude/dispatch/log` last 10 lines. Print result. Exit skill. |
-| `^kill task:(\S+)` | `tmux kill-window -t $TMUX_SESSION:task:<slug>` + `scripts/lazy-anchor-registry.sh remove task:<slug>`. Print confirmation. Exit skill. |
-| `^reattach (\S+)` | Print: `tmux attach -t $TMUX_SESSION \; select-window -t <name>`. Exit skill. |
+| `^(list\|ls\|status\|what'?s running)` | `tmux list-windows -t claude -F '#{window_name} #{window_index}'` + tail `~/.claude/dispatch/log` last 10 lines. Print result. Exit skill. |
+| `^kill task:(\S+)` | `tmux kill-window -t claude:task:<slug>`. Print confirmation. Exit skill. |
+| `^reattach (\S+)` | Print: `tmux attach -t claude \; select-window -t <name>`. Exit skill. |
 | `^show last` | `cat ~/.claude/dispatch/last-dispatch.json`. Exit skill. |
-| `^compact` | Run `/compact` in the current session. Exit skill. |
+| `^compact` | Run `/compact` in current session. Exit skill. |
 | `^cancel` | Print "dispatch cancelled." Exit skill. |
-| `^(actually\|wait\|switch to\|change to\|instead\|redirect\|reroute)` | Follow-up redirect: read `last-dispatch.json`, re-classify folder+depth with combined context (previous target + new message), proceed from Step 2 with "redirect:" prefix in reasoning line. Optionally kill prior window if ephemeral. |
+| `^(actually\|wait\|switch to\|change to\|instead\|redirect\|reroute)` | Redirect: read `last-dispatch.json`, kill prior `task:<slug>` window via `tmux kill-window -t claude:<window>` (every dispatch is ephemeral), then proceed from Step 2 with combined prompt. Tag reasoning line "redirect:". |
 
 If no match → continue to Step 2.
 
-### Step 2 — Folder classify
+### Step 2 — Overnight + folder prefix
 
-Read `references/folder-map.md`. Apply in order:
+1. Strip leading `overnight:` (case-insensitive, after whitespace). If matched:
+   - `OVERNIGHT=true`
+   - Print: `[dispatch] overnight mode → opus + automode`
+2. Strip leading `@(smartast|metagap|life|metaenhance)`. Map prefix → cwd:
 
-1. Explicit prefix: `@(<folder-name>)` in message → pick directly, skip reasoning.
-   (Customize the recognized prefix list to match your own folder names.)
-2. Keyword regex table — first section that matches wins.
-3. LLM inference if no regex hit — one sentence.
+   | Prefix | cwd |
+   |---|---|
+   | `@smartast` | `$HOME/lytech_smartast` |
+   | `@metagap` | `$HOME/MetaGap` |
+   | `@life` | `$HOME/Life` |
+   | `@metaenhance` | `$HOME` |
+   | (none) | `$HOME` |
 
-Print: `pick: <folder>  reason: <one line>`
+3. Print: `cwd: <path>`.
 
-Folder → cwd mapping (defined in `references/folder-map.md`; examples):
-- `meta` → `$HOME` (meta-work: agents, sessions, dispatch, hooks, claude config)
-- `proj-a` → `$HOME/proj-a`
-- `proj-b` → `$HOME/proj-b`
+No regex inference, no LLM guessing, no interactive folder confirm. Typo in
+prefix (e.g. `@smaartast`) silently falls through to `$HOME` — user sees the
+mismatch on the printed `cwd:` line.
 
-### Step 3 — Confirm folder
+### Step 3 — Slug derive
 
-```
-[y] accept  [1] meta  [2] proj-a  [3] proj-b  [4] other (type path)
-> _
-```
+First 4 significant words of stripped prompt (drop stopwords: the/a/an/to/in/
+for/with/and/of). Lowercase, hyphen-join.
 
-Wait for 1 char. If `4`, prompt for path; must exist or re-prompt. Re-print pick line after any override.
-Customize this prompt menu to list your actual folder names.
+Collision check: if `~/.claude/tasks/YYYY-MM-DD-HHMM-<slug>.md` exists, append
+`-s<seconds>`. If still collides, append `-r$(openssl rand -hex 3)`.
 
-### Step 4 — Triage depth
+### Step 4 — Brief write
 
-Read `references/triage-cues.md`. Classify: quick / medium / complex.
+Read `references/brief-template.md`. Fill placeholders:
 
-Inspect: `len(message)`, newline count, vocabulary, ends-with-`?`.
-
-Print: `depth: <d>  reason: <cue>`
-
-Override: accept `y` / `q` (quick) / `m` (medium) / `c` (complex).
-
-Depth implications:
-- quick → inline Agent in meta (no plan mode)
-- medium → anchor window with auto-brief (no plan mode)
-- complex → ephemeral task window with **plan mode + brainstorming forced** in target
-
-### Step 5 — Medium brief (medium only)
-
-Read `references/brief-template.md`. Fill:
-- `FOLDER_PLACEHOLDER` → confirmed folder path
-- `SESSION_SHAPE_PLACEHOLDER` → `anchor:<folder-name>`
-- `DEPTH_PLACEHOLDER` → `medium`
+- `FOLDER_PLACEHOLDER` → cwd
+- `SESSION_SHAPE_PLACEHOLDER` → `ephemeral:task:<slug>`
+- `DEPTH_PLACEHOLDER` → `complex` (constant — every task is complex)
 - `CREATED_PLACEHOLDER` → `date -Iseconds`
-- `SLUG_PLACEHOLDER` → first 4 significant words of prompt (strip: the/a/an/to/in/for/with/and/of)
+- `SLUG_PLACEHOLDER` → derived slug
 - `TITLE_PLACEHOLDER` → Title-cased slug
 - `GOAL_PLACEHOLDER` → tightened one-paragraph summary of prompt
 - `CRITERIA_PLACEHOLDER` → 2–3 measurable bullets inferred from prompt
-- `RESEARCH_PLACEHOLDER` → `yes — <skill recommendation>` or `no`
+- `RESEARCH_PLACEHOLDER` → `yes — <skill rec>` or `no`
 - `ORIGINAL_PROMPT_PLACEHOLDER` → verbatim user prompt
-- `DISPATCH_CMD_PLACEHOLDER` → the tmux paste-buffer command (see Step 7)
+- `DISPATCH_CMD_PLACEHOLDER` → tmux paste-buffer command from Step 5
 
-Slug collision check: if `~/.claude/tasks/YYYY-MM-DD-HHMM-<slug>.md` exists, append `-s<seconds>`; if still collision, append `-r$(openssl rand -hex 3)`.
+Write to `~/.claude/tasks/YYYY-MM-DD-HHMM-<slug>.md`. No interactive confirm —
+strict mode: brief auto-generated, dispatched immediately.
 
-Write to `~/.claude/tasks/YYYY-MM-DD-HHMM-<slug>.md`.
+### Step 5 — Spawn + dispatch (always ephemeral)
 
-Show rendered brief in meta pane. Confirm `y` / open for inline edit.
+1. Spawn fresh window:
+   - `OVERNIGHT=true` → `scripts/ensure-anchor.sh task:<slug> <cwd> --overnight`
+   - `OVERNIGHT=false` → `scripts/ensure-anchor.sh task:<slug> <cwd>`
 
-### Step 6 — Session shape
+   No `--lazy`, no busy-check, no anchor lookup. Always new.
 
-| Depth | Shape |
-|---|---|
-| quick | `inline` |
-| medium | `anchor:<folder-name>` |
-| complex | `ephemeral:task:<slug>` |
-
-### Step 7 — Dispatch
-
-**inline:**
-```
-Agent(
-  subagent_type="general-purpose",
-  prompt="<full user prompt>\n\nWork in: <cwd>\n\nUse bash tool to cd <cwd> before any file operations."
-)
-```
-Return summary to meta. Done.
-
-**anchor:<name>:**
-1. Check if window exists: `tmux list-windows -t $TMUX_SESSION -F '#{window_name}' | grep -qx <name>`
-2. If missing and name is in the lazy-anchors list (`$DISPATCH_LAZY_ANCHORS`): `scripts/ensure-anchor.sh <name> <cwd> --lazy`
-3. If missing and name is a static anchor (must pre-exist): warn user. Do NOT call `Skill("remote-control")` — `/remote-control` is a UI command, `ensure-anchor.sh` sends it via `tmux send-keys` internally.
-4. `scripts/dispatch-to-window.sh <name> --paste-file ~/.claude/tasks/<brief>.md`
-
-**ephemeral:task:<slug>:**
-1. `scripts/ensure-anchor.sh task:<slug> <cwd>` (no --lazy; always new)
-2. Create minimal brief (Step 5 template but `session_shape: ephemeral:task:<slug>`, body only Goal + Original Prompt + Dispatch Cmd)
-3. Write dispatch message to temp file with the iron-fist protocol:
+2. Write iron-fist dispatch message to a temp file:
 
    ```text
    Read ~/.claude/tasks/<brief>.md.
 
    This task is COMPLEX — follow the iron-fist protocol:
 
-   1. Enter plan mode immediately via the EnterPlanMode tool (load schema with ToolSearch first if not in tools list).
-   2. Invoke superpowers:brainstorming skill to clarify intent and surface edge cases.
+   1. Enter plan mode immediately via the EnterPlanMode tool (load schema with
+      ToolSearch first if not in tools list).
+   2. Invoke superpowers:brainstorming skill to clarify intent and surface edge
+      cases.
    3. Invoke superpowers:writing-plans skill to draft an implementation plan.
-   4. Present the plan via ExitPlanMode and wait for user approval before any edit.
+   4. Present the plan via ExitPlanMode and wait for user approval before any
+      edit.
 
-   Work in: <cwd>. Target file is <one-line hint from brief Goal/Success Criteria, or "see brief" if none>.
+   Work in: <cwd>. Target file is <one-line hint from brief Goal/Success
+   Criteria, or "see brief">.
    ```
 
-   Substitute `<brief>` and `<cwd>` literally. "Target file" hint: scan the brief Goal/Success Criteria for a file path; fall back to "see brief".
+   Substitute `<brief>`, `<cwd>` literally. "Target file" hint: scan brief
+   Goal/Success Criteria for a file path; fall back to "see brief".
 
-4. `scripts/dispatch-to-window.sh task:<slug> --paste-file <tempfile>`
+3. `scripts/dispatch-to-window.sh task:<slug> --paste-file <tempfile>`.
 
-### Step 8 — Register
+   Per `~/.claude/rules/learning-dispatch-script-exit1.md`: ignore exit 1,
+   verify delivery via `tmux capture-pane -p -t claude:task:<slug> | tail -20`.
 
-If anchor used: `scripts/lazy-anchor-registry.sh touch <anchor-name>`
-
-### Step 9 — Audit
+### Step 6 — Audit + print
 
 Append JSONL line to `~/.claude/dispatch/log`:
 ```json
-{"ts":"<ISO>","slug":"<slug>","folder":"<folder>","shape":"<shape>","window":"<window>","brief":"<path>","exit":0}
+{"ts":"<ISO>","slug":"<slug>","folder":"<cwd>","shape":"ephemeral:task:<slug>","window":"task:<slug>","brief":"<path>","exit":0}
 ```
 
-Write `~/.claude/dispatch/last-dispatch.json` with same fields (full json, not JSONL).
+Write `~/.claude/dispatch/last-dispatch.json` with the same fields (full json,
+not JSONL).
 
-### Step 10 — Print anchor-back
-
+Print:
 ```
-task <slug> dispatched → $TMUX_SESSION:<window>
-attach: tmux attach -t $TMUX_SESSION \; select-window -t <window>
-brief:  <path or "none">
+task <slug> dispatched → claude:task:<slug>
+attach: tmux attach -t claude \; select-window -t task:<slug>
+brief:  ~/.claude/tasks/<file>.md
 ```
-
----
-
-## Meta context hygiene
-
-Inline tasks (Step 7 inline path) use Agent subagents so meta's own context accumulates only summaries. All audit/list operations are file reads. Use `compact` meta-intent on demand.

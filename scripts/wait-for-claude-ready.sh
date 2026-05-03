@@ -16,7 +16,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TMUX_SESSION="${TMUX_SESSION:-claude}"
+TMUX_SESSION="claude"
 DISPATCH_DIR="${HOME}/.claude/dispatch"
 SESSIONS_DIR="${HOME}/.claude/sessions"
 

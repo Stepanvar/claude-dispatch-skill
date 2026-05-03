@@ -6,7 +6,7 @@
 set -euo pipefail
 
 WINDOW="${1:?Usage: dispatch-to-window.sh <window-name> --paste-file <path>|--text <str>}"
-TMUX_SESSION="${TMUX_SESSION:-claude}"
+TMUX_SESSION="claude"
 TARGET="${TMUX_SESSION}:${WINDOW}"
 
 shift
